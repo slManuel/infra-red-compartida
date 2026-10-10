@@ -1,0 +1,23 @@
+[
+  "module.acceso_privado.aws_route.salida_privada_a",
+  "module.acceso_privado.aws_route.salida_privada_b",
+  "module.acceso_privado.aws_route_table.rutas_privadas_a",
+  "module.acceso_privado.aws_route_table.rutas_privadas_b",
+  "module.acceso_privado.aws_route_table_association.privada_a",
+  "module.acceso_privado.aws_route_table_association.privada_b",
+  "module.acceso_privado.aws_vpc_endpoint.s3",
+  "module.red_base.aws_subnet.subred_privada_a",
+  "module.red_base.aws_subnet.subred_privada_b",
+  "module.red_base.aws_subnet.subred_publica_a",
+  "module.red_base.aws_subnet.subred_publica_b",
+  "module.red_base.aws_vpc.vpc_compartida",
+  "module.salida_internet.aws_eip.ip_publica_nat",
+  "module.salida_internet.aws_eip.ip_publica_nat_b",
+  "module.salida_internet.aws_internet_gateway.gateway_internet",
+  "module.salida_internet.aws_nat_gateway.nat_publico",
+  "module.salida_internet.aws_nat_gateway.nat_publico_b",
+  "module.salida_internet.aws_route.salida_publica_internet",
+  "module.salida_internet.aws_route_table.rutas_publicas",
+  "module.salida_internet.aws_route_table_association.publica_a",
+  "module.salida_internet.aws_route_table_association.publica_b"
+]
