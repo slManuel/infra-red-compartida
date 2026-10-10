@@ -1,36 +1,60 @@
 # Red compartida
 
-VPC 10.0.0.0/16 en us-east-1, con dos subredes privadas y dos públicas repartidas entre us-east-1a/us-east-1b. No se asignan IP públicas automáticamente. Cada subred privada usa un NAT público en su propia AZ; ambas tablas privadas usan un endpoint gateway S3. Los dos NAT/EIP generan costos mientras existan.
+Este repositorio crea la red AWS que comparten los proyectos de infraestructura de Jenkins/Vault y del microservicio. Ambos consultan su estado Terraform para obtener la VPC y las subredes privadas, sin crear una red independiente.
 
-## Módulos por responsabilidad
+La red está en `us-east-1`: una VPC `10.0.0.0/16`, dos subredes privadas y dos públicas repartidas entre `us-east-1a` y `us-east-1b`. Cada subred privada sale a Internet mediante un NAT de su zona; ambas acceden a S3 mediante un endpoint gateway. Las subredes públicas tienen una ruta al Internet Gateway. Ninguna subred asigna IP pública automáticamente.
 
-- red_base: VPC y cuatro subredes.
-- salida_internet: Internet Gateway, tabla/ruta/asociaciones públicas, dos EIP y dos NAT zonales.
-- acceso_privado: tablas/rutas/asociaciones privadas y endpoint S3.
+## Organización
 
-main.tf conecta los módulos sin ciclos. Recursos explícitos, sin for/for_each. moved.tf conserva las direcciones de raíz y la organización intermedia module.red mediante cadenas moved. La configuración de los 21 recursos se conserva. Outputs públicos: vpc_id, private_subnet_ids y private_subnet_ids_by_az.
+- **`modules/red_base/`**: crea la VPC y las cuatro subredes.
+- **`modules/salida_internet/`**: crea el Internet Gateway, los dos NAT con sus IP elásticas y las rutas públicas.
+- **`modules/acceso_privado/`**: crea las rutas privadas hacia los NAT y el endpoint S3.
+- **`.github/workflows/`**: contiene el pipeline de validación y despliegue; **`.github/recursos-autorizados.json`** delimita los recursos admitidos por el plan.
 
-## Despliegue
+En la raíz, **`main.tf`** conecta los tres módulos. **`outputs.tf`** publica la VPC y las subredes privadas que consumen los otros proyectos; **`moved.tf`** conserva las referencias de recursos reorganizados. Los demás archivos definen variables, proveedor y versiones.
 
-Terraform 1.15.9 en GitHub Actions; provider AWS 6.68.0 fijado y lock versionado. Configurar aws_account_id para ejecución local; el workflow usa 022907376152. Backend S3: bucket tfstate-prueba-cuscatlan-oct2026-jose-manuel-solis, key red-compartida/terraform.tfstate, región us-east-1, cifrado y use_lockfile=true. El estado no se versiona.
+**`backend.tf`** guarda el estado de red en el bucket creado por `infra-estado-terraform`, bajo `red-compartida/terraform.tfstate`, con cifrado y bloqueo. El estado no se guarda en Git. Los dos NAT y sus IP elásticas generan costos mientras existan.
 
-Push a main y workflow_dispatch ejecutan checks, autenticación OIDC con prueba-devops-github-actions-red, init/validate/plan y apply automático del mismo archivo. PR solo ejecuta checks, sin AWS. Acciones fijadas por SHA; sin claves AWS persistentes. El job serializa despliegues, verifica main y rechaza recursos ajenos a .github/recursos-autorizados.json o acciones distintas de create/no-op. Es una compuerta de despliegue inicial, que debe revisarse antes de futuras actualizaciones.
+## Workflow de GitHub Actions
 
-Plan y diagnósticos se conservan un día como artefactos privados; pueden contener datos sensibles. S3 conserva el estado versionado y su lock. Un fallo parcial normal conserva en S3 los recursos ya registrados; revisar antes de repetir. Si falla guardar estado remoto, errored.tfstate se conserva como diagnóstico privado y debe recuperarse antes de continuar.
+`.github/workflows/terraform.yml` declara **2 jobs y 14 pasos**: `checks` (5) → `deploy` (9); no define stages. Se activa con push a `main`, pull requests hacia `main` o ejecución manual (`workflow_dispatch`). `deploy` espera a que termine correctamente `checks` y solo se ejecuta manualmente sobre `main` con `AWS_DEPLOY_ENABLED=true`. Publicar código no aplica infraestructura. Las ejecuciones se serializan sin cancelar la anterior.
 
-El rol de red no permite destruir infraestructura; la retirada requiere una revisión y autorización separadas. No ejecutar destroy con permisos ampliados sin revisar los recursos.
+| Job `checks`: paso | Función |
+|---|---|
+| 1. Checkout | Obtiene el código del repositorio. |
+| 2. Setup Terraform | Instala Terraform 1.15.9. |
+| 3. `terraform fmt -check -recursive -diff` | Comprueba el formato de la raíz y los módulos sin modificar archivos. |
+| 4. `terraform init -backend=false -lockfile=readonly` | Inicializa módulos y proveedores sin configurar el backend ni modificar el lockfile. |
+| 5. `terraform validate` | Valida la configuración Terraform. |
 
-## Validación
+| Job `deploy`: paso | Función |
+|---|---|
+| 1. Checkout | Obtiene el código que se va a desplegar. |
+| 2. Setup Terraform | Instala Terraform 1.15.9. |
+| 3. Configurar credenciales AWS | Asume el rol de red mediante OIDC con credenciales temporales. |
+| 4. Inicializar y validar | Conecta con el backend S3 sin modificar el lockfile y valida la configuración. |
+| 5. Planificar y comprobar alcance | Guarda `infra.tfplan` y `plan.log`; exige cubrir la lista de recursos autorizados y solo admite creaciones o recursos sin cambios. |
+| 6. Guardar plan privado para revisión | Incluso ante fallo, intenta guardar el plan y su log disponibles como artefacto durante 1 día. |
+| 7. Comprobar main antes de aplicar | Verifica que `main` todavía apunta al commit de la ejecución. |
+| 8. Aplicar el mismo plan guardado | Aplica automáticamente `infra.tfplan`, registra `apply.log` y añade el resultado al resumen si termina correctamente. |
+| 9. Guardar diagnóstico privado de apply | Incluso ante fallo, intenta guardar `apply.log` y `errored.tfstate` disponibles como artefacto durante 1 día. |
 
-terraform fmt -check -recursive; terraform init -backend=false -lockfile=readonly; terraform validate. Validación offline realizada sin AWS: 21 cuerpos de recursos equivalentes tras normalizar referencias, 0 errores y 0 avisos. Verificar el plan y el apply reales en Actions; validación local no demuestra despliegue.
+Los conteos incluyen los pasos con `if: always()`, que intentan conservar evidencias aunque falle un paso anterior. La ejecución manual inicia el flujo completo; no constituye una aprobación separada del plan. El estado de red se guarda en el backend S3 descrito arriba, con bloqueo; los artefactos de diagnóstico no sustituyen ese backend.
 
-[Refactorización Terraform](https://developer.hashicorp.com/terraform/language/modules/develop/refactoring) · [Backend S3](https://developer.hashicorp.com/terraform/language/backend/s3).
+## Evidencias
 
+La [ejecución 38025806539](https://github.com/slManuel/infra-red-compartida/actions/runs/38025806539) terminó correctamente: **21 recursos creados, 0 cambios y 0 eliminaciones**. Las capturas reales de Actions y de la consola AWS están en [imágenes/](imágenes/).
 
-## Logs de Terraform — 9 de octubre de 2026
+| Captura | Qué muestra |
+|---|---|
+| [01 — Workflow, plan y apply](imágenes/01-github-workflow-plan-apply-21-recursos.jpg) | Jobs exitosos y resultado de las 21 creaciones. |
+| [02 — VPC](imágenes/02-aws-vpc-disponible-cidr-dns.jpg) | VPC disponible, CIDR y DNS habilitado. |
+| [03 — Subredes](imágenes/03-aws-cuatro-subredes-disponibles.jpg) | Las cuatro subredes disponibles y sus rangos. |
+| [04 — Internet Gateway](imágenes/04-aws-internet-gateway-conectado.jpg) | Gateway conectado a la VPC del proyecto. |
+| [05 — NAT](imágenes/05-aws-dos-nat-publicos-disponibles.jpg) | Los dos NAT públicos disponibles. |
+| [06 — Rutas privadas A](imágenes/06-aws-rutas-privadas-a-nat-s3.jpg) | Rutas activas hacia su NAT y el endpoint S3. |
+| [07 — Rutas privadas B](imágenes/07-aws-rutas-privadas-b-nat-s3.jpg) | Rutas activas hacia su NAT y el endpoint S3. |
+| [08 — Rutas públicas](imágenes/08-aws-rutas-publicas-internet-gateway.jpg) | Ruta activa hacia el Internet Gateway. |
+| [09 — Endpoint S3](imágenes/09-aws-endpoint-s3-dos-tablas-privadas.jpg) | Endpoint gateway disponible y asociado a las dos tablas privadas. |
 
-Los pasos de plan y apply muestran ahora el texto legible de Terraform en directo con `-no-color` y `tee`, y conservan `plan.log` y `apply.log` como artefactos privados de un día. Antes la redirección o captura completa ocultaba el progreso; algunos fallos solo mostraban exit 1. Bash captura `PIPESTATUS` inmediatamente: prevalece el código original de Terraform; si Terraform termina bien y tee falla, el paso también falla. Ensayos locales confirmaron stdout/stderr visibles y códigos 0 y 37 conservados.
-
-En Actions abrir el job deploy y el paso Planificar o Aplicar: aparecen refrescos, Creating/Still creating, errores del proveedor y código real. Las comprobaciones de alcance siguen leyendo el plan JSON en memoria sin imprimirlo. No se imprimen estados Terraform, credenciales ni tokens; se revisaron los recursos y outputs actuales, que contienen infraestructura e identificadores, sin valores secretos. Antes de incorporar recursos con secretos se debe revisar nuevamente la salida. Los respaldos de estado y planes binarios continúan en artefactos privados.
-
-El recorrido sigue siendo validar → planificar → comprobar alcance → aplicar el mismo plan guardado → verificar AWS. Esta mejora conserva OIDC, backend, triggers y mecanismo automático vigente. La publicación usa `[skip ci]` para evitar despliegues adicionales durante el apply activo; no cambia el comportamiento de las ejecuciones futuras.
+Estas evidencias acreditan el despliegue de la red y la configuración mostrada; no son una prueba de tráfico desde aplicaciones.
